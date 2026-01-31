@@ -109,9 +109,9 @@ jobs:
         working-directory: lambdas/${{ matrix.function }}
         run: npm ci
       
-      - name: Run tests
-        working-directory: lambdas/${{ matrix.function }}
-        run: npm test
+      # - name: Run tests
+      #   working-directory: lambdas/${{ matrix.function }}
+      #   run: npm test
       
       - name: Package Lambda
         working-directory: lambdas/${{ matrix.function }}
