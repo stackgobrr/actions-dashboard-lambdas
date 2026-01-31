@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - 'lambdas/**'
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 env:
@@ -79,7 +81,7 @@ jobs:
           echo "name=$BUCKET_NAME" >> $GITHUB_OUTPUT
 
   build-lambdas:
-    needs: create-lambda-bucket
+    needs: [create-lambda-bucket, setup]
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -121,7 +123,7 @@ jobs:
         run: |
           aws s3 cp \
             lambdas/${{ matrix.function }}/lambda-${{ matrix.function }}-${{ github.sha }}.zip \
-            s3://${{ needs.create-lambda-bucket.bucket_name }}/lambda-${{ matrix.function }}-${{ github.sha }}.zip
+            s3://${{ needs.create-lambda-bucket.outputs.bucket_name }}/lambda-${{ matrix.function }}-${{ github.sha }}.zip
       
       - name: Upload artifact for manifest
         uses: actions/upload-artifact@v6
@@ -132,7 +134,7 @@ jobs:
           retention-days: 1
 
   generate-manifest:
-    needs: [build-lambdas, create-lambda-bucket] 
+    needs: [build-lambdas, create-lambda-bucket, setup]
     runs-on: ubuntu-latest
     
     steps:
@@ -153,7 +155,7 @@ jobs:
         # Dynamically find lambda function names from lambdas/ subdirectories 
         run: |
           LAMBDAS=$(for fn in $(ls -d lambdas/*/ | xargs -n1 basename); do
-            echo "\"$fn\": {\"package\": \"s3://${{ needs.create-lambda-bucket.bucket_name }}/lambda-${fn}-${{ github.sha }}.zip\", \"sha\": \"${{ github.sha }}\"}"
+            echo "\"$fn\": {\"package\": \"s3://${{ needs.create-lambda-bucket.outputs.bucket_name }}/lambda-${fn}-${{ github.sha }}.zip\", \"sha\": \"${{ github.sha }}\"}"
           done | paste -sd,)
 
           cat > manifest.json <<EOF
@@ -169,7 +171,7 @@ jobs:
       - name: Upload manifest to S3
         run: |
           aws s3 cp manifest.json \
-            s3://${{ needs.create-lambda-bucket.bucket_name }}/manifests/lambda-manifest.json
+            s3://${{ needs.create-lambda-bucket.outputs.bucket_name }}/manifests/lambda-manifest.json
       
       - name: Trigger main repository deployment
         run: |
@@ -177,4 +179,4 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer ${{ secrets.MAIN_REPO_TRIGGER_TOKEN }}" \
             https://api.github.com/repos/${{ vars.MAIN_REPO }}/dispatches \
-            -d '{"event_type":"lambda-updated","client_payload":{"sha":"${{ github.sha }}"}}'
+            -d '{"event_type":"lambda-updated","client_payload":{"sha":"${{ github.sha }}","environment":"${{ needs.setup.outputs.environment }}","bucket":"${{ needs.create-lambda-bucket.outputs.bucket_name }}"}}'
