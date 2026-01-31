@@ -173,10 +173,11 @@ jobs:
           aws s3 cp manifest.json \
             s3://${{ needs.create-lambda-bucket.outputs.bucket_name }}/manifests/lambda-manifest.json
       
-      - name: Trigger main repository deployment
+      - name: Trigger development deployment
+        if: needs.setup.outputs.environment == 'Development'
         run: |
           curl -X POST \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer ${{ secrets.MAIN_REPO_TRIGGER_TOKEN }}" \
             https://api.github.com/repos/${{ vars.MAIN_REPO }}/dispatches \
-            -d '{"event_type":"lambda-updated","client_payload":{"sha":"${{ github.sha }}","environment":"${{ needs.setup.outputs.environment }}","bucket":"${{ needs.create-lambda-bucket.outputs.bucket_name }}"}}'
+            -d '{"event_type":"lambda-updated","client_payload":{"sha":"${{ github.sha }}"}}'
