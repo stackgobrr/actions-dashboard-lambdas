@@ -79,6 +79,7 @@ jobs:
           echo "name=$BUCKET_NAME" >> $GITHUB_OUTPUT
 
   build-lambdas:
+    needs: create-lambda-bucket
     runs-on: ubuntu-latest
     strategy:
       matrix:
