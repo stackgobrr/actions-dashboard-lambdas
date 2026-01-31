@@ -132,7 +132,7 @@ jobs:
           retention-days: 1
 
   generate-manifest:
-    needs: build-lambdas
+    needs: [build-lambdas, create-lambda-bucket] 
     runs-on: ubuntu-latest
     
     steps:
