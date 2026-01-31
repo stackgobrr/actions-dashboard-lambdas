@@ -27,6 +27,7 @@ jobs:
           else
             echo "environment=Development" >> "$GITHUB_OUTPUT"
             echo "tfvars_env=dev" >> "$GITHUB_OUTPUT"
+          fi
 
   create-lambda-bucket:
     name: Create Lambda Artifacts Bucket
