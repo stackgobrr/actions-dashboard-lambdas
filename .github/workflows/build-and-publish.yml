@@ -8,6 +8,71 @@ on:
   workflow_dispatch:
 
 jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.env.outputs.environment }}
+      tfvars_env: ${{ steps.env.outputs.tfvars_env }}
+    steps:
+      - name: Set environment
+        id: env
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            echo "environment=Production" >> "$GITHUB_OUTPUT"
+            echo "tfvars_env=prod" >> "$GITHUB_OUTPUT"
+          else
+            echo "environment=Development" >> "$GITHUB_OUTPUT"
+            echo "tfvars_env=dev" >> "$GITHUB_OUTPUT"
+
+  create-lambda-bucket:
+    name: Create Lambda Artifacts Bucket
+    needs: [setup]
+    runs-on: ubuntu-latest
+    environment: ${{ needs.setup.outputs.environment }}
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      bucket_name: ${{ steps.bucket.outputs.name }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: stackgobrr/common-github-actions/actions/aws-configure@main
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          auth-method: 'static'
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.14.1'
+          terraform_wrapper: false
+
+      - name: Cache Terraform
+        uses: actions/cache@v4
+        with:
+          path: infra/.terraform
+          key: terraform-${{ needs.setup.outputs.environment }}-${{ hashFiles('infra/.terraform.lock.hcl') }}
+
+      - name: Create S3 bucket for Lambda artifacts
+        run: |
+          cd infra
+          terraform init \
+          -backend-config="key=utils/actions-dashboard/${{ needs.setup.outputs.tfvars_env }}/${{ github.event.repository.name}}.tfstate"
+          terraform apply -auto-approve -var-file=env/${{ needs.setup.outputs.tfvars_env }}.tfvars
+
+      - name: Get Lambda artifacts bucket name
+        id: bucket
+        run: |
+          cd infra
+          BUCKET_NAME=$(terraform output -raw lambda_artifacts_bucket)
+          echo "name=$BUCKET_NAME" >> $GITHUB_OUTPUT
+
   build-lambdas:
     runs-on: ubuntu-latest
     strategy:
@@ -50,7 +115,7 @@ jobs:
         run: |
           aws s3 cp \
             lambdas/${{ matrix.function }}/lambda-${{ matrix.function }}-${{ github.sha }}.zip \
-            s3://${{ vars.LAMBDA_S3_BUCKET_NAME }}/lambda-${{ matrix.function }}-${{ github.sha }}.zip
+            s3://${{ needs.create-lambda-bucket.bucket_name }}/lambda-${{ matrix.function }}-${{ github.sha }}.zip
       
       - name: Upload artifact for manifest
         uses: actions/upload-artifact@v6
@@ -82,7 +147,7 @@ jobs:
         # Dynamically find lambda function names from lambdas/ subdirectories 
         run: |
           LAMBDAS=$(for fn in $(ls -d lambdas/*/ | xargs -n1 basename); do
-            echo "\"$fn\": {\"package\": \"s3://${{ vars.LAMBDA_S3_BUCKET_NAME }}/lambda-${fn}-${{ github.sha }}.zip\", \"sha\": \"${{ github.sha }}\"}"
+            echo "\"$fn\": {\"package\": \"s3://${{ needs.create-lambda-bucket.bucket_name }}/lambda-${fn}-${{ github.sha }}.zip\", \"sha\": \"${{ github.sha }}\"}"
           done | paste -sd,)
 
           cat > manifest.json <<EOF
@@ -98,7 +163,7 @@ jobs:
       - name: Upload manifest to S3
         run: |
           aws s3 cp manifest.json \
-            s3://${{ vars.LAMBDA_S3_BUCKET_NAME }}/manifests/lambda-manifest.json
+            s3://${{ needs.create-lambda-bucket.bucket_name }}/manifests/lambda-manifest.json
       
       - name: Trigger main repository deployment
         run: |
