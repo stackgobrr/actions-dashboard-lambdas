@@ -3,8 +3,6 @@ name: Build and Publish Lambdas
 on:
   push:
     branches: [main]
-    paths:
-      - 'lambdas/**'
     tags:
       - 'v*'
   workflow_dispatch:
