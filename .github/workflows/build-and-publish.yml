@@ -7,6 +7,10 @@ on:
       - 'lambdas/**'
   workflow_dispatch:
 
+env:
+  AWS_REGION: eu-west-2
+  NODE_VERSION: '20'
+
 jobs:
   setup:
     runs-on: ubuntu-latest
