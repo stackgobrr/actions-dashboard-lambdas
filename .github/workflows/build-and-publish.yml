@@ -71,7 +71,7 @@ jobs:
           cd infra
           terraform init \
           -backend-config="key=utils/actions-dashboard/${{ needs.setup.outputs.tfvars_env }}/${{ github.event.repository.name}}.tfstate"
-          terraform apply -auto-approve -var-file=env/${{ needs.setup.outputs.tfvars_env }}.tfvars
+          terraform apply -auto-approve -var="environment=${{ needs.setup.outputs.tfvars_env }}"
 
       - name: Get Lambda artifacts bucket name
         id: bucket
