@@ -1,0 +1,183 @@
+name: Build and Publish Lambdas
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'lambdas/**'
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+env:
+  AWS_REGION: eu-west-2
+  NODE_VERSION: '20'
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.env.outputs.environment }}
+      tfvars_env: ${{ steps.env.outputs.tfvars_env }}
+    steps:
+      - name: Set environment
+        id: env
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            echo "environment=Production" >> "$GITHUB_OUTPUT"
+            echo "tfvars_env=prod" >> "$GITHUB_OUTPUT"
+          else
+            echo "environment=Development" >> "$GITHUB_OUTPUT"
+            echo "tfvars_env=dev" >> "$GITHUB_OUTPUT"
+          fi
+
+  create-lambda-bucket:
+    name: Create Lambda Artifacts Bucket
+    needs: [setup]
+    runs-on: ubuntu-latest
+    environment: ${{ needs.setup.outputs.environment }}
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      bucket_name: ${{ steps.bucket.outputs.name }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: stackgobrr/common-github-actions/actions/aws-configure@main
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          auth-method: 'static'
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.14.1'
+          terraform_wrapper: false
+
+      - name: Cache Terraform
+        uses: actions/cache@v4
+        with:
+          path: infra/.terraform
+          key: terraform-${{ needs.setup.outputs.environment }}-${{ hashFiles('infra/.terraform.lock.hcl') }}
+
+      - name: Create S3 bucket for Lambda artifacts
+        run: |
+          cd infra
+          terraform init \
+          -backend-config="key=utils/actions-dashboard/${{ needs.setup.outputs.tfvars_env }}/${{ github.event.repository.name}}.tfstate"
+          terraform apply -auto-approve -var="environment=${{ needs.setup.outputs.tfvars_env }}"
+
+      - name: Get Lambda artifacts bucket name
+        id: bucket
+        run: |
+          cd infra
+          BUCKET_NAME=$(terraform output -raw lambda_artifacts_bucket)
+          echo "name=$BUCKET_NAME" >> $GITHUB_OUTPUT
+
+  build-lambdas:
+    needs: [create-lambda-bucket, setup]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        function: [oauth-start, oauth-callback]
+    
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: stackgobrr/common-github-actions/actions/aws-configure@main
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          auth-method: 'static'
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: 'lambdas/${{ matrix.function }}/package-lock.json'
+      
+      - name: Install dependencies
+        working-directory: lambdas/${{ matrix.function }}
+        run: npm ci
+      
+      - name: Run tests
+        working-directory: lambdas/${{ matrix.function }}
+        run: npm test
+      
+      - name: Package Lambda
+        working-directory: lambdas/${{ matrix.function }}
+        run: |
+          zip -r lambda-${{ matrix.function }}-${{ github.sha }}.zip \
+            index.js package.json package-lock.json node_modules/
+      
+      - name: Upload to S3
+        run: |
+          aws s3 cp \
+            lambdas/${{ matrix.function }}/lambda-${{ matrix.function }}-${{ github.sha }}.zip \
+            s3://${{ needs.create-lambda-bucket.outputs.bucket_name }}/lambda-${{ matrix.function }}-${{ github.sha }}.zip
+      
+      - name: Upload artifact for manifest
+        uses: actions/upload-artifact@v6
+        with:
+          name: lambda-${{ matrix.function }}-metadata
+          path: |
+            lambdas/${{ matrix.function }}/package.json
+          retention-days: 1
+
+  generate-manifest:
+    needs: [build-lambdas, create-lambda-bucket, setup]
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: stackgobrr/common-github-actions/actions/aws-configure@main
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          auth-method: 'static'
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+      
+      - name: Generate manifest
+        # Dynamically find lambda function names from lambdas/ subdirectories 
+        run: |
+          LAMBDAS=$(for fn in $(ls -d lambdas/*/ | xargs -n1 basename); do
+            echo "\"$fn\": {\"package\": \"s3://${{ needs.create-lambda-bucket.outputs.bucket_name }}/lambda-${fn}-${{ github.sha }}.zip\", \"sha\": \"${{ github.sha }}\"}"
+          done | paste -sd,)
+
+          cat > manifest.json <<EOF
+          {
+            "commit_sha": "${{ github.sha }}",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "repository": "${{ github.repository }}",
+            "lambdas": { $LAMBDAS }
+          }
+          EOF
+          cat manifest.json
+      
+      - name: Upload manifest to S3
+        run: |
+          aws s3 cp manifest.json \
+            s3://${{ needs.create-lambda-bucket.outputs.bucket_name }}/manifests/lambda-manifest.json
+      
+      - name: Trigger development deployment
+        if: needs.setup.outputs.environment == 'Development'
+        run: |
+          curl -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${{ secrets.MAIN_REPO_TRIGGER_TOKEN }}" \
+            https://api.github.com/repos/${{ vars.MAIN_REPO }}/dispatches \
+            -d '{"event_type":"lambda-updated","client_payload":{"sha":"${{ github.sha }}"}}'
