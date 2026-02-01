@@ -96,15 +96,13 @@ exports.handler = async (event) => {
 
     const accessToken = tokenJson.access_token
 
-    // Set httpOnly cookie with the access token and clear state cookie
+    // Redirect to frontend with token in URL hash (secure - not sent to server)
+    // Clear the OAuth state cookie
     return {
       statusCode: 302,
       headers: {
-        'Location': '/',
-        'Set-Cookie': [
-          `gh_session=${accessToken}; HttpOnly; Path=/; Max-Age=86400; SameSite=Lax; Secure`,
-          'oauth_state=; HttpOnly; Path=/; Max-Age=0; Secure'
-        ].join(', ')
+        'Location': `/#token=${accessToken}`,
+        'Set-Cookie': 'oauth_state=; HttpOnly; Path=/; Max-Age=0; Secure'
       },
       body: ''
     }
